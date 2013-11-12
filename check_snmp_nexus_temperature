@@ -1,0 +1,207 @@
+#!/usr/bin/env perl 
+
+#####
+# check_snmp_nexus_temperature:
+# Check script for nagios that will find relevant temperature sensors
+# and trigger alarm if any of them goes above defined threshold
+#
+# Author: Diddi Oscarsson <diddi@diddi.se>
+#####
+
+use warnings;
+use strict;
+
+use Nagios::Plugin;
+use Net::SNMP qw(:snmp);
+use Getopt::Long;
+use POSIX;
+use Data::Dumper;
+my $np = Nagios::Plugin->new(
+    usage => "Usage: %s -H <host> -C <community> -w <warning value> -c <critical value>");
+
+$np->add_arg(
+    spec => "warning|w=i",
+    help => "-w, --warning <integer>. Set what return value should raise a warning.",
+);
+
+$np->add_arg(
+    spec => "critical|c=i",
+    help => "-c, --critical <integer>. Set what return value should raise a critical.",
+);
+
+$np->add_arg(
+    spec => "host|H=s",
+    help => "-H, --host <hostname>. Set the host/ip to send snmp queries to.",
+    required => 1,
+);
+
+$np->add_arg(
+    spec => "community|C=s",
+    help => "-C, --community <community>. Set the SNMP community to use for the query.",
+    required => 1,
+);
+
+
+$np->getopts;
+my $sev = 0;
+my $session = undef;
+my $error = undef;
+my %oid_Sensors;
+my $oid_DeviceModel = '1.3.6.1.2.1.47.1.1.1.1.7.149';
+my $entPhysicalDescr = '.1.3.6.1.2.1.47.1.1.1.1.2';
+
+# Get Device model
+($session, $error) = Net::SNMP->session(
+    -hostname => $np->opts->host,
+    -community => $np->opts->community,
+);
+my $result = $session->get_request(-varbindlist => [ $oid_DeviceModel ] );
+my $result_hash = $session->var_bind_list();
+
+# Clear data
+$session->close();
+$session = undef;
+
+if( $result_hash->{$oid_DeviceModel} =~ m/^Nexus7000 C7[0-9]{1,3}/i ) {
+    ($session, $error) = Net::SNMP->session(
+        -hostname => $np->opts->host,
+        -community => $np->opts->community,
+        -nonblocking => 1,
+        -timeout   => "5",
+        -port      => "161",
+        -version   => 'snmpv2c',
+    );
+
+    if(not defined($session)) {
+        printf("ERROR: %s.\n", $error);
+        exit(UNKNOWN);
+    }
+
+    my %table; # Hash to store the results
+    $result = $session->get_bulk_request(
+       -varbindlist    => [ $entPhysicalDescr ],
+       -callback       => [ \&table_callback, \%table ],
+       -maxrepetitions => 10,
+    );
+
+    if (!defined $result) {
+       printf "ERROR: %s\n", $session->error();
+       $session->close();
+       exit (UNKNOWN);
+    }
+
+    # Now initiate the SNMP message exchange.
+    snmp_dispatcher();
+    $session->close();
+    $session = undef;
+
+    # Look for a matching disk
+    for my $oid (oid_lex_sort(keys %table)) {
+        if($table{$oid} =~ m/(Intake)/i) {
+        my $descr = $table{$oid};
+        $oid_Sensors{".1.3.6.1.4.1.9.9.91.1.1.1.1.4.$1"} = $descr if $oid =~ /\.([0-9]+)$/;
+        }
+    }
+}elsif( $result_hash->{$oid_DeviceModel} =~ m/^Nexus5010 Chassis/i ) {
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21592'} = 'Intake';
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21596'} = 'Power1';
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21597'} = 'Power2';
+}elsif( $result_hash->{$oid_DeviceModel} =~ m/^Nexus5020 Chassis/i ) {
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21594'} = 'Intake';
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21598'} = 'Power1';
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21599'} = 'Power2';
+}elsif( $result_hash->{$oid_DeviceModel} =~ m/^Nexus5596 Chassis/i ) {
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21599'} = 'Module 1';
+    $oid_Sensors{'.1.3.6.1.4.1.9.9.91.1.1.1.1.4.21600'} = 'Module 2';
+}
+
+($session, $error) = Net::SNMP->session(
+    -hostname => $np->opts->host,
+    -community => $np->opts->community,
+);
+$result = $session->get_request(-varbindlist => [ keys(%oid_Sensors) ] );
+$result_hash = $session->var_bind_list();
+
+# Clear data
+$session->close();
+$session = undef;
+
+foreach my $temp (values(%{$result_hash})) {
+    if ( $temp >= $np->opts->critical) {
+        $sev = 3;
+    }elsif( $sev < 3 and ($temp >= $np->opts->warning and $temp < $np->opts->critical) ) {
+        $sev = 2;
+    }
+}
+
+if($sev == 3) {
+    printf("CRITICAL: ");
+    foreach my $oid (keys(%oid_Sensors)) {
+        printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
+    }
+    printf("\n");
+    exit(CRITICAL);
+}
+
+if($sev == 2) {
+        printf("WARNING: ");
+        foreach my $oid (keys(%oid_Sensors)) {
+                printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
+        }
+        printf("\n");
+        exit(WARNING);
+}
+
+if($sev == 0) {
+        printf("OK: ");
+        foreach my $oid (keys(%oid_Sensors)) {
+                printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
+        }
+        printf("\n");
+        exit(OK);
+}
+
+sub table_callback
+{
+   my ($session, $table) = @_;
+
+   my $list = $session->var_bind_list();
+
+   if (!defined $list) {
+      printf "ERROR: %s\n", $session->error();
+      return;
+   }
+
+   # Loop through each of the OIDs in the response and assign
+   # the key/value pairs to the reference that was passed with
+   # the callback. Make sure that we are still in the table
+   # before assigning the key/values.
+
+   my @names = $session->var_bind_names();
+   my $next  = undef;
+
+   while (@names) {
+      $next = shift @names;
+      if (!oid_base_match($entPhysicalDescr, $next)) {
+         return; # Table is done.
+      }
+      $table->{$next} = $list->{$next};
+   }
+
+   # Table is not done, send another request, starting at the last
+   # OBJECT IDENTIFIER in the response. No need to include the
+   # calback argument, the same callback that was specified for the
+   # original request will be used.
+
+   my $result = $session->get_bulk_request(
+      -varbindlist    => [ $next ],
+      -maxrepetitions => 10,
+   );
+
+   if (!defined $result) {
+      printf "ERROR: %s.\n", $session->error();
+   }
+
+   return;
+}
+
