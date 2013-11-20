@@ -136,7 +136,7 @@ foreach my $temp (values(%{$result_hash})) {
 
 if($sev == 3) {
     printf("CRITICAL: ");
-    foreach my $oid (keys(%oid_Sensors)) {
+    foreach my $oid (keys(%{$result_hash})) {
         printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
     }
     printf("\n");
@@ -145,7 +145,7 @@ if($sev == 3) {
 
 if($sev == 2) {
         printf("WARNING: ");
-        foreach my $oid (keys(%oid_Sensors)) {
+        foreach my $oid (keys(%{$result_hash})) {
                 printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
         }
         printf("\n");
@@ -154,7 +154,7 @@ if($sev == 2) {
 
 if($sev == 0) {
         printf("OK: ");
-        foreach my $oid (keys(%oid_Sensors)) {
+        foreach my $oid (keys(%{$result_hash})) {
                 printf("%s: %s, ", $oid_Sensors{$oid}, $result_hash->{$oid});
         }
         printf("\n");
